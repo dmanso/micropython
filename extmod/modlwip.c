@@ -45,7 +45,7 @@
 #include "lwip/dns.h"
 #include "lwip/tcp_impl.h"
 
-#if 0 // print debugging info
+#if 1 // print debugging info
 #define DEBUG_printf DEBUG_printf
 #else // don't print debugging info
 #define DEBUG_printf(...) (void)0
@@ -1272,6 +1272,31 @@ STATIC mp_obj_t lwip_getaddrinfo(mp_obj_t host_in, mp_obj_t port_in) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_getaddrinfo_obj, lwip_getaddrinfo);
 
+// lwip.ping
+STATIC mp_obj_t lwip_ping(mp_obj_t addr_in, mp_obj_t timeout_in) {
+    uint8_t ip[NETUTILS_IPV4ADDR_BUFSIZE];
+    netutils_parse_ipv4_addr(addr_in, ip, NETUTILS_BIG);
+
+    //ip_addr_t addr;
+    //IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
+
+    mp_uint_t timeout;
+    if (timeout_in == mp_const_none) {
+        timeout = -1;
+    } else {
+        #if MICROPY_PY_BUILTINS_FLOAT
+        timeout = 1000 * mp_obj_get_float(timeout_in);
+        #else
+        timeout = 1000 * mp_obj_get_int(timeout_in);
+        #endif
+    }
+
+    DEBUG_printf("lwip_ping: called ping (ip %d.%d.%d.%d timeout %d)\n", ip[0], ip[1], ip[2], ip[3], timeout);
+
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_ping_obj, lwip_ping);
+
 // Debug functions
 
 STATIC mp_obj_t lwip_print_pcbs() {
@@ -1287,6 +1312,7 @@ STATIC const mp_map_elem_t mp_module_lwip_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_reset), (mp_obj_t)&mod_lwip_reset_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_callback), (mp_obj_t)&mod_lwip_callback_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_getaddrinfo), (mp_obj_t)&lwip_getaddrinfo_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ping), (mp_obj_t)&lwip_ping_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_print_pcbs), (mp_obj_t)&lwip_print_pcbs_obj },
     // objects
     { MP_OBJ_NEW_QSTR(MP_QSTR_socket), (mp_obj_t)&lwip_socket_type },
