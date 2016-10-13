@@ -41,9 +41,10 @@
 #include "lwip/timers.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
-//#include "lwip/raw.h"
+#include "lwip/raw.h"
 #include "lwip/dns.h"
 #include "lwip/tcp_impl.h"
+#include "lwip/inet_chksum.h"
 
 #if 1 // print debugging info
 #define DEBUG_printf DEBUG_printf
@@ -1272,30 +1273,167 @@ STATIC mp_obj_t lwip_getaddrinfo(mp_obj_t host_in, mp_obj_t port_in) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_getaddrinfo_obj, lwip_getaddrinfo);
 
-// lwip.ping
-STATIC mp_obj_t lwip_ping(mp_obj_t addr_in, mp_obj_t timeout_in) {
-    uint8_t ip[NETUTILS_IPV4ADDR_BUFSIZE];
-    netutils_parse_ipv4_addr(addr_in, ip, NETUTILS_BIG);
+typedef struct _ping_state_t {
+    volatile int status;
+    volatile ip_addr_t ipaddr;
+    volatile uint16_t id;
+    volatile uint16_t seq;
+#define BUF_OUT 1
+#ifdef BUF_OUT
+    vstr_t vstr;
+#endif
+} ping_state_t;
 
-    //ip_addr_t addr;
-    //IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
+// Callback for timeout echo responses.
+STATIC void lwip_ping_timeout_cb(void *arg) {
+    ping_state_t *state = arg;
+    if (state->status != 0) {
+        return;
+    }
+    state->status = 2;
+    DEBUG_printf("lwip_ping_timeout_cb: Timeout ping\n");
+}
+// Callback for incoming echo responses.
+STATIC u8_t lwip_ping_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p, ip_addr_t *addr) {
+    ping_state_t *state = arg;
+    struct icmp_echo_hdr *iecho;
+
+    // TODO: reensamblado de paquetes
+  
+    DEBUG_printf("lwip_ping_recv_cb: received icmp protocol from %d.%d.%d.%d\n", \
+	ip4_addr1(addr), ip4_addr2(addr), ip4_addr3(addr), ip4_addr4(addr));
+
+    if (pbuf_header(p, -PBUF_IP_HLEN) == 0 && p->len >=8) {
+        DEBUG_printf("lwip_ping_recv_cb: minimal icmp length OK %d >= 8\n", p->len);
+    
+        if (inet_chksum(p->payload, p->len) == 0) {
+            DEBUG_printf("lwip_ping_recv_cb: checksum OK\n");
+
+            iecho = (struct icmp_echo_hdr *)p->payload;
+            DEBUG_printf("lwip_ping_recv_cb: type: %d code: %d\n", iecho->type, iecho->code);
+            if (iecho->type == htons(ICMP_ER) && iecho->code == htons(0)) {
+
+                DEBUG_printf("lwip_ping_recv_cb: ip_addr_cmp %d\n", ip_addr_cmp(addr, &(state->ipaddr)));
+                DEBUG_printf("lwip_ping_recv_cb: id: %d seq: %d\n", ntohs(iecho->id), ntohs(iecho->seqno));
+                if (ip_addr_cmp(addr, &(state->ipaddr)) \
+                        && iecho->id == htons(state->id) && iecho->seqno == htons(state->seq)) {
+                    DEBUG_printf("lwip_ping_recv_cb: PONG OK\n");
+                    state->status = 1;
+
+#ifdef BUF_OUT
+                    vstr_init_len(&(state->vstr), p->len - 8);
+                    pbuf_copy_partial(p, state->vstr.buf, p->len - 8, 8);
+#endif
+      
+                    pbuf_free(p);
+                    return 1; /* eat the packet */
+                }
+            }
+            // else ICMP ERRORs
+        }
+    }
+  
+    return 0; /* don't eat the packet */
+}
+
+// lwip.ping
+STATIC mp_obj_t lwip_ping(mp_uint_t n_args, const mp_obj_t *args) {
+    uint8_t ip[NETUTILS_IPV4ADDR_BUFSIZE];
+    netutils_parse_ipv4_addr(args[0], ip, NETUTILS_BIG);
+    ip_addr_t addr;
+    IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
 
     mp_uint_t timeout;
-    if (timeout_in == mp_const_none) {
-        timeout = -1;
-    } else {
-        #if MICROPY_PY_BUILTINS_FLOAT
-        timeout = 1000 * mp_obj_get_float(timeout_in);
-        #else
-        timeout = 1000 * mp_obj_get_int(timeout_in);
-        #endif
-    }
+    #if MICROPY_PY_BUILTINS_FLOAT
+    timeout = 1000 * mp_obj_get_float(args[1]);
+    #else
+    timeout = 1000 * mp_obj_get_int(args[1]);
+    #endif
+
+    uint16_t id, seq;
+    id  = mp_obj_get_int(args[2]) % 65536;
+    seq = mp_obj_get_int(args[3]) % 65536;
 
     DEBUG_printf("lwip_ping: called ping (ip %d.%d.%d.%d timeout %d)\n", ip[0], ip[1], ip[2], ip[3], timeout);
 
-    return mp_const_none;
+    static struct raw_pcb *ping_pcb;
+    ping_pcb = raw_new(IP_PROTO_ICMP);
+    if (ping_pcb == NULL) {
+        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(MP_ENOMEM)));
+    }
+
+    struct pbuf *p;
+    struct icmp_echo_hdr *iecho;
+    size_t ping_size;
+
+    mp_buffer_info_t bufinfo;
+    bufinfo.len = 0;
+    //DEBUG_printf("lwip_ping: n_args %d\n", n_args);
+    //DEBUG_printf("lwip_ping: bufinfo.len %d\n", bufinfo.len);
+    if (n_args >= 5) {
+        mp_get_buffer_raise(args[4], &bufinfo, MP_BUFFER_READ);
+    }
+
+    ping_size = sizeof(struct icmp_echo_hdr) + bufinfo.len;
+
+    p = pbuf_alloc(PBUF_IP, (u16_t)ping_size, PBUF_RAM);
+    if (p == NULL) {
+        raw_remove(ping_pcb);
+        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(MP_ENOMEM)));
+    }
+
+    iecho = (struct icmp_echo_hdr *)p->payload;
+        ICMPH_TYPE_SET(iecho, ICMP_ECHO);
+        ICMPH_CODE_SET(iecho, 0);
+        iecho->chksum = 0;
+        iecho->id     = htons(id);
+        iecho->seqno  = htons(seq);
+        for(int i = 0; i < bufinfo.len; i++) {
+          ((char*)iecho)[sizeof(struct icmp_echo_hdr) + i] = ((char *)bufinfo.buf)[i];
+        }
+        iecho->chksum = inet_chksum(iecho, ping_size);
+    raw_sendto(ping_pcb, p, &addr);
+
+    // TODO: send packages larger than MTU
+
+    pbuf_free(p);
+
+    ping_state_t state;
+    state.status = 0;
+    state.ipaddr = addr;
+    state.id  = id;
+    state.seq = seq;
+
+    raw_recv(ping_pcb, lwip_ping_recv_cb, &state);
+    raw_bind(ping_pcb, IP_ADDR_ANY);
+
+    sys_timeout(timeout, lwip_ping_timeout_cb, &state);
+    while (state.status == 0) {
+        poll_sockets();
+    }
+    sys_untimeout(lwip_ping_timeout_cb, ping_pcb);
+
+    raw_remove(ping_pcb);
+
+    if (state.status == 1) {
+        DEBUG_printf("PONG\n");
+#ifdef BUF_OUT
+        mp_obj_t tuple[2];
+        tuple[0] = mp_obj_new_int_from_uint(1);
+        tuple[1] = mp_obj_new_str_from_vstr(&mp_type_bytes, &state.vstr);
+        return mp_obj_new_tuple(2, tuple);
+#else
+        return mp_obj_new_int_from_uint(1);
+#endif
+    } else if (state.status == 2) {
+        DEBUG_printf("TIMEOUT\n");
+        return mp_obj_new_int_from_uint(0);
+    } else {
+        return mp_obj_new_int_from_uint(0);
+    }
+    
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_ping_obj, lwip_ping);
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lwip_ping_obj, 4, 5, lwip_ping);
 
 // Debug functions
 
