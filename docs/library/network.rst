@@ -356,16 +356,17 @@ For example::
        Following are commonly supported parameters (availability of a specific parameter
        depends on network technology type, driver, and MicroPython port).
 
-       =========  ===========
-       Parameter  Description
-       =========  ===========
-       mac        MAC address (bytes)
-       essid      WiFi access point name (string)
-       channel    WiFi channel (integer)
-       hidden     Whether ESSID is hidden (boolean)
-       authmode   Authentication mode supported (enumeration, see module constants)
-       password   Access password (string)
-       =========  ===========
+       =========       ===========
+       Parameter       Description
+       =========       ===========
+       mac             MAC address (bytes)
+       essid           WiFi access point name (string)
+       channel         WiFi channel (integer)
+       hidden          Whether ESSID is hidden (boolean)
+       authmode        Authentication mode supported (enumeration, see module constants)
+       password        Access password (string)
+       dhcp_hostname   Station DHCP hostname (string)
+       =========       ===========
 
 
 

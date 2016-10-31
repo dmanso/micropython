@@ -300,7 +300,7 @@ STATIC mp_obj_t esp_config(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs
                             nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError,
                                 "invalid buffer length"));
                         }
-                        wifi_set_macaddr(self->if_id, bufinfo.buf);
+                        error_check(wifi_set_macaddr(self->if_id, bufinfo.buf), "can't set MAC");
                         break;
                     }
                     case QS(MP_QSTR_essid): {
@@ -334,6 +334,19 @@ STATIC mp_obj_t esp_config(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs
                     case QS(MP_QSTR_channel): {
                         req_if = SOFTAP_IF;
                         cfg.ap.channel = mp_obj_get_int(kwargs->table[i].value);
+                        break;
+                    }
+                    case QS(MP_QSTR_dhcp_hostname): {
+                        req_if = STATION_IF;
+                        if (self->if_id == STATION_IF) {
+                            mp_buffer_info_t bufinfo;
+                            mp_get_buffer_raise(kwargs->table[i].value, &bufinfo, MP_BUFFER_READ);
+                            if (bufinfo.len > 32) {
+                                nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError,
+                                    "invalid buffer length"));
+                            }
+                            error_check(wifi_station_set_hostname(bufinfo.buf), "can't set DHCP hostname");
+                        }
                         break;
                     }
                     default:
@@ -388,6 +401,14 @@ STATIC mp_obj_t esp_config(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs
         case QS(MP_QSTR_channel):
             req_if = SOFTAP_IF;
             val = MP_OBJ_NEW_SMALL_INT(cfg.ap.channel);
+            break;
+        case QS(MP_QSTR_dhcp_hostname):
+            req_if = STATION_IF;
+            char *hostname = wifi_station_get_hostname();
+            if (hostname == NULL) {
+                error_check(false, "can't get DHCP hostname");
+            }
+            val = mp_obj_new_str(hostname, strlen(hostname), false);
             break;
         default:
             goto unknown;
